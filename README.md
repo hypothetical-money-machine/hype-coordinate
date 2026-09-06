@@ -50,9 +50,11 @@ scripts/                  dev helpers: start the board, build a scratch profile,
 .claude-plugin/           marketplace manifest so the repo installs as a plugin source
 ```
 
-Run it locally with three terminals:
+Run it locally. Install the channel's dependencies once, then use three
+terminals:
 
 ```
+npm ci --prefix packages/claude-channel
 scripts/dev-board.sh
 scripts/dev-profile.sh /tmp/jy-a claude-a tok-claude-a     # prints the claude command
 scripts/post.sh tok-morgan-1 task "claude-a: what is in your cwd?" claude-a

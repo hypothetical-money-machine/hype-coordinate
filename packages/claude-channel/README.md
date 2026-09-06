@@ -9,6 +9,14 @@ it runs only with the development flag.
 
 ## Run it
 
+Install dependencies first. Claude Code installs them automatically only for
+plugins fetched from a marketplace, not for a checkout run through
+`--mcp-config`:
+
+```
+npm ci --prefix packages/claude-channel
+```
+
 From this repository, add the repo as a local marketplace and install the plugin:
 
 ```
@@ -91,7 +99,10 @@ each tool-approval prompt as a directed post to each approver, and an approver
 answers with `yes <id>` or `no <id>`. The relay only honors an id it forwarded
 itself within the last ten minutes, and only from an agent in `approvers`.
 Approvers are a separate list from `allowFrom` because approving tool use is a
-larger grant than posting into the session. The relay refuses to start if
+larger grant than posting into the session. The lists are independent: an
+approver's `yes`/`no` replies are honored whether or not that agent is in
+`allowFrom`, and an approver not in `allowFrom` has no other way to post into
+the session. The relay refuses to start if
 `approvers` is empty. Off by default.
 
 ## Testing

@@ -351,32 +351,39 @@ async function onEvent(id: string, data: string): Promise<void> {
     return
   }
   if (seen.has(post.id)) return
-  markSeen(post.id)
 
-  if (post.from === AGENT_ID) return writeCursor(post.id)
-  if (!senderAllowed(post.from)) {
-    log(`dropped post ${post.id} from ${post.from}: not allowlisted`)
-    return writeCursor(post.id)
+  const done = (): void => {
+    markSeen(post.id)
+    writeCursor(post.id)
   }
 
+  if (post.from === AGENT_ID) return done()
+
+  // Permission replies are checked against approvers, not allowFrom. The two
+  // lists are independent: an approver need not be able to post into the session.
   if (RELAY) {
     const m = PERMISSION_REPLY_RE.exec(post.body)
-    if (m) {
+    if (m && isApprover(post.from)) {
       const requestId = m[2].toLowerCase()
       prunePending()
-      if (!isApprover(post.from)) {
-        log(`ignored permission reply from ${post.from}: not an approver`)
-      } else if (!pending.has(requestId)) {
+      if (!pending.has(requestId)) {
         log(`ignored permission reply from ${post.from}: unknown or expired request ${requestId}`)
-      } else {
-        pending.delete(requestId)
-        await mcp.notification({
-          method: 'notifications/claude/channel/permission',
-          params: { request_id: requestId, behavior: m[1].toLowerCase().startsWith('y') ? 'allow' : 'deny' },
-        })
+        return done()
       }
-      return writeCursor(post.id)
+      // Notification is sent before the id is consumed and the post marked seen,
+      // so a transport failure leaves both in place for the replay on reconnect.
+      await mcp.notification({
+        method: 'notifications/claude/channel/permission',
+        params: { request_id: requestId, behavior: m[1].toLowerCase().startsWith('y') ? 'allow' : 'deny' },
+      })
+      pending.delete(requestId)
+      return done()
     }
+  }
+
+  if (!senderAllowed(post.from)) {
+    log(`dropped post ${post.id} from ${post.from}: not allowlisted`)
+    return done()
   }
 
   await mcp.notification({
@@ -394,9 +401,9 @@ async function onEvent(id: string, data: string): Promise<void> {
       },
     },
   })
-  // Cursor advances only after the notification is handed to the transport,
-  // so a crash before this point replays the post on reconnect.
-  writeCursor(post.id)
+  // Seen and cursor advance only after the notification is handed to the
+  // transport, so a failure before this point replays the post on reconnect.
+  done()
 }
 
 /** Minimal SSE client over fetch with Last-Event-ID resume. Node 24 has no global EventSource. */

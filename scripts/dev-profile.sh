@@ -18,6 +18,10 @@
 set -euo pipefail
 PROFILE="${1:?profile dir}"; AGENT="${2:?agent id}"; TOKEN="${3:?agent token}"; BOARD="${4:-http://127.0.0.1:8790}"
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
+if [ ! -d "$REPO/packages/claude-channel/node_modules" ]; then
+  echo "channel dependencies missing; run: npm ci --prefix $REPO/packages/claude-channel" >&2
+  exit 1
+fi
 SETTINGS="$HOME/.claude/settings.json"
 BASE_URL="${JY_BASE_URL:-$(node -e 'try{console.log(require(process.argv[1]).env?.ANTHROPIC_BASE_URL??"")}catch{console.log("")}' "$SETTINGS")}"
 KEY_HELPER="${JY_KEY_HELPER:-$(node -e 'try{console.log(require(process.argv[1]).apiKeyHelper??"")}catch{console.log("")}' "$SETTINGS")}"
