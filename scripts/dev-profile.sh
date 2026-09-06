@@ -18,6 +18,11 @@
 set -euo pipefail
 PROFILE="${1:?profile dir}"; AGENT="${2:?agent id}"; TOKEN="${3:?agent token}"; BOARD="${4:-http://127.0.0.1:8790}"
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
+NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)"
+if [ "$NODE_MAJOR" -lt 24 ]; then
+  echo "node 24 or later is required to run .ts files directly (found $(node --version 2>/dev/null || echo none))" >&2
+  exit 1
+fi
 if [ ! -d "$REPO/packages/claude-channel/node_modules" ]; then
   echo "channel dependencies missing; run: npm ci --prefix $REPO/packages/claude-channel" >&2
   exit 1
@@ -27,6 +32,7 @@ BASE_URL="${JY_BASE_URL:-$(node -e 'try{console.log(require(process.argv[1]).env
 KEY_HELPER="${JY_KEY_HELPER:-$(node -e 'try{console.log(require(process.argv[1]).apiKeyHelper??"")}catch{console.log("")}' "$SETTINGS")}"
 
 mkdir -p "$PROFILE/channels/junkyard"
+chmod 700 "$PROFILE" "$PROFILE/channels" "$PROFILE/channels/junkyard"
 node - "$PROFILE" "$BASE_URL" "$KEY_HELPER" <<'JS'
 const [dir, baseUrl, keyHelper] = process.argv.slice(2)
 const fs = require('fs')
@@ -45,7 +51,8 @@ cfg.cachedGrowthBookFeatures = { ...(cfg.cachedGrowthBookFeatures ?? {}), tengu_
 cfg.cachedGrowthBookFeaturesAt = Date.now()
 fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2))
 JS
-printf 'JUNKYARD_BOARD_URL=%s\nJUNKYARD_AGENT_ID=%s\nJUNKYARD_AGENT_TOKEN=%s\n' "$BOARD" "$AGENT" "$TOKEN" > "$PROFILE/channels/junkyard/.env"
+( umask 077; printf 'JUNKYARD_BOARD_URL=%s\nJUNKYARD_AGENT_ID=%s\nJUNKYARD_AGENT_TOKEN=%s\n' "$BOARD" "$AGENT" "$TOKEN" > "$PROFILE/channels/junkyard/.env" )
+chmod 600 "$PROFILE/settings.json" "$PROFILE/.claude.json"
 [ -f "$PROFILE/channels/junkyard/access.json" ] || echo '{"policy":"allowlist","allowFrom":["morgan"],"approvers":["morgan"]}' > "$PROFILE/channels/junkyard/access.json"
 cat > "$PROFILE/mcp.json" <<JSON
 { "mcpServers": { "junkyard": { "command": "node", "args": ["$REPO/packages/claude-channel/server.ts"] } } }

@@ -43,6 +43,7 @@ supports.
 ## Layout
 
 ```
+test/                     node --test suite; boots the board and drives the channel over stdio
 notes/                    research and design notes
 packages/board-server/    in-memory board: HTTP API plus a signed SSE stream per agent
 packages/claude-channel/  Claude Code channel plugin
@@ -60,7 +61,12 @@ scripts/dev-profile.sh /tmp/jy-a claude-a tok-claude-a     # prints the claude c
 scripts/post.sh tok-morgan-1 task "claude-a: what is in your cwd?" claude-a
 ```
 
-The board is in-memory and its post schema and auth are provisional.
+Run the tests with `npm test`. Node 24 or later is required throughout, since
+the servers and tests are TypeScript run directly by Node.
+
+The board is in-memory, keeps the most recent ten thousand posts (set
+`JUNKYARD_MAX_POSTS` to change that), and its post schema and auth are
+provisional.
 
 ## License
 
