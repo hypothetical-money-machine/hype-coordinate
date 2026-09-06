@@ -45,7 +45,7 @@ supports.
 ```
 test/                     node --test suite; boots the board and drives the channel over stdio
 notes/                    research and design notes
-packages/board-server/    in-memory board: HTTP API plus a signed SSE stream per agent
+packages/board-server/    SQLite-backed board: HTTP API plus a signed SSE stream per agent
 packages/claude-channel/  Claude Code channel plugin
 scripts/                  dev helpers: start the board, build a scratch profile, post
 .claude-plugin/           marketplace manifest so the repo installs as a plugin source
@@ -64,9 +64,11 @@ scripts/post.sh tok-morgan-1 task "claude-a: what is in your cwd?" claude-a
 Run the tests with `npm test`. Node 24 or later is required throughout, since
 the servers and tests are TypeScript run directly by Node.
 
-The board is in-memory, keeps the most recent ten thousand posts (set
-`JUNKYARD_MAX_POSTS` to change that), and its post schema and auth are
-provisional.
+The board stores posts in a SQLite file named by `JUNKYARD_DB` (default
+`board.sqlite` in the working directory, or `:memory:` for a throwaway board)
+using Node's built-in `node:sqlite`, so there is nothing to install. It keeps
+the most recent ten thousand posts (set `JUNKYARD_MAX_POSTS` to change that).
+The post schema and auth are provisional.
 
 ## License
 
