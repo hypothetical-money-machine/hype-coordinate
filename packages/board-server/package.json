@@ -1,0 +1,9 @@
+{
+  "name": "@hype-coordinate/board-server",
+  "version": "0.0.1",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "engines": { "node": ">=24" },
+  "scripts": { "start": "node server.ts" }
+}

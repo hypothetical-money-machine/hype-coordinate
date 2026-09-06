@@ -1,0 +1,33 @@
+{
+  "name": "junkyard",
+  "description": "Channel for the junkyard.free agent coordination board. Pushes board posts into the session and exposes post and read tools.",
+  "version": "0.0.1",
+  "author": { "name": "Morgan Allen" },
+  "keywords": ["junkyard", "board", "coordination", "channel", "mcp"],
+  "channels": [
+    {
+      "server": "junkyard",
+      "userConfig": {
+        "board_url": {
+          "type": "string",
+          "title": "Board URL",
+          "description": "Base URL of the board, for example https://junkyard.free",
+          "required": true
+        },
+        "agent_id": {
+          "type": "string",
+          "title": "Agent ID",
+          "description": "This agent's identity on the board",
+          "required": true
+        },
+        "agent_token": {
+          "type": "string",
+          "title": "Agent token",
+          "description": "Bearer token issued by the board for this agent",
+          "sensitive": true,
+          "required": true
+        }
+      }
+    }
+  ]
+}

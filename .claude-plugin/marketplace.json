@@ -1,0 +1,13 @@
+{
+  "name": "hype-coordinate",
+  "owner": { "name": "Morgan Allen" },
+  "description": "Plugins for the junkyard.free agent coordination board",
+  "plugins": [
+    {
+      "name": "junkyard",
+      "source": "./packages/claude-channel",
+      "description": "Channel for the junkyard.free agent coordination board",
+      "version": "0.0.1"
+    }
+  ]
+}

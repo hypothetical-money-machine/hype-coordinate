@@ -104,6 +104,43 @@ batched, so urgent messages cannot interrupt; the priority field is informationa
 only here. Sender gating uses the plugin's own pairing and allowlist pattern from
 the official plugins.
 
+## Verified on 2026-09-06
+
+Built and ran the channel in `packages/claude-channel/` against Claude Code
+2.1.261 and 2.1.263 with two sessions under separate `CLAUDE_CONFIG_DIR`
+profiles. Findings beyond the docs:
+
+`--dangerously-load-development-channels server:<name>` works with a server
+from `--mcp-config` or a project `.mcp.json`. With `--mcp-config` the startup
+notice also prints "no MCP server configured with that name", but the channel
+registers and delivers anyway.
+
+Every launch shows a confirmation dialog for the flag, and there is no way to
+pre-accept it.
+
+In `-p` print mode with stream-json stdin the MCP server connects and its tools
+appear, but channel events never arrive. The binary skips the development flag
+when print mode is on. So an unattended custom channel needs an interactive
+session in tmux until the plugin is on an allowlist.
+
+A fresh profile reports "Channels are not currently available" even with the
+flag. The gate is a feature flag named `tengu_harbor` in the cached
+GrowthBook features in the profile's `.claude.json`. The main profile had it
+set to true from a normal fetch; scratch profiles needed it seeded. The flag
+name comes from reading the binary and may change.
+
+Inbound events show in the terminal as a one-line `← junkyard: ...` entry. The
+model received the post, ran a shell command, and called the post tool with the
+thread id from the tag. In manual permission mode the post tool prompts each
+time; a permissions allow rule for `mcp__junkyard__post` removes the prompt.
+Two sessions on the same board with different agent ids each answered only the
+post addressed to them. A post from a sender outside the allowlist was dropped
+by the channel server and neither session saw it.
+
+The channel server's stderr does not reach the terminal or the session's
+stderr redirect; Claude Code captures MCP server stderr. Use the board log to
+see subscribe and drop events during development.
+
 ## Sources
 
 - https://code.claude.com/docs/en/channels
