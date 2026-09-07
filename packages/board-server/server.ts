@@ -98,6 +98,25 @@ const stmt = {
   after: db.prepare('SELECT * FROM posts WHERE seq > ? ORDER BY seq'),
   lastN: db.prepare('SELECT * FROM posts WHERE seq > (SELECT coalesce(max(seq), 0) - ? FROM posts) ORDER BY seq'),
   trim: db.prepare('DELETE FROM posts WHERE seq <= (SELECT max(seq) FROM posts) - ?'),
+  // Newest `limit` rows the caller may read (own posts, public posts, or posts addressed
+  // to them), optionally within a thread, returned oldest first. Filtering and bounding
+  // happen in SQL so a list never decodes more rows than it returns.
+  list: db.prepare(`
+    SELECT * FROM (
+      SELECT * FROM posts
+      WHERE seq > :after
+        AND ("from" = :agent OR "to" IS NULL OR "to" = :agent)
+        AND (:thread IS NULL OR thread = :thread)
+      ORDER BY seq DESC LIMIT :limit
+    ) ORDER BY seq
+  `),
+}
+
+/** A write the database refused. The post was not stored; the client should see a 500, not a 400. */
+class StorageError extends Error {
+  constructor(cause: unknown) {
+    super(`storage: ${cause instanceof Error ? cause.message : String(cause)}`)
+  }
 }
 
 type Row = Record<string, unknown>
@@ -117,10 +136,18 @@ function rowToPost(r: Row): Post {
   return post
 }
 
+/** Insert and trim commit together: a post is either stored and delivered, or neither. */
 function insertPost(p: Omit<Post, 'seq'>): Post {
-  const { lastInsertRowid } = stmt.insert.run(p.id, p.ts, p.from, p.type, p.body, p.thread, p.to ?? null, p.priority)
-  stmt.trim.run(MAX_POSTS)
-  return { ...p, seq: Number(lastInsertRowid) }
+  db.exec('BEGIN IMMEDIATE')
+  try {
+    const { lastInsertRowid } = stmt.insert.run(p.id, p.ts, p.from, p.type, p.body, p.thread, p.to ?? null, p.priority)
+    stmt.trim.run(MAX_POSTS)
+    db.exec('COMMIT')
+    return { ...p, seq: Number(lastInsertRowid) }
+  } catch (err) {
+    try { db.exec('ROLLBACK') } catch { /* transaction already gone */ }
+    throw new StorageError(err)
+  }
 }
 
 function seqOf(id: string): number | null {
@@ -134,6 +161,10 @@ function postsAfter(seq: number): Post[] {
 
 function lastPosts(n: number): Post[] {
   return (stmt.lastN.all(n) as Row[]).map(rowToPost)
+}
+
+function listPosts(agent: string, after: number, thread: string | null, limit: number): Post[] {
+  return (stmt.list.all({ after, agent, thread, limit }) as Row[]).map(rowToPost)
 }
 
 function postCount(): number {
@@ -277,6 +308,10 @@ function handlePostCreate(req: IncomingMessage, res: ServerResponse): void {
     .catch(err => {
       const msg = err instanceof Error ? err.message : String(err)
       if (res.headersSent || res.destroyed) return
+      if (err instanceof StorageError) {
+        process.stderr.write(`board: ${msg}\n`)
+        return json(res, 500, { error: 'storage failure; post not saved' })
+      }
       json(res, msg === 'body too large' ? 413 : 400, { error: msg })
     })
 }
@@ -289,9 +324,8 @@ function handlePostList(req: IncomingMessage, url: URL, res: ServerResponse): vo
   const limit = parseLimit(url.searchParams.get('limit'), 50, 500)
   const start = since ? (seqOf(since) ?? 0) : 0
   // The caller's own posts are included here (unlike the stream) so it can read back what it wrote.
-  let out = postsAfter(start).filter(p => p.from === caller.agent || visibleTo(p, caller.agent))
-  if (thread) out = out.filter(p => p.thread === thread)
-  json(res, 200, { posts: out.slice(-limit) })
+  // The SQL predicate mirrors visibleTo() plus that own-post rule; keep the two in step.
+  json(res, 200, { posts: listPosts(caller.agent, start, thread, limit) })
 }
 
 function handleEvents(req: IncomingMessage, res: ServerResponse): void {
