@@ -64,6 +64,14 @@ scripts/post.sh tok-morgan-1 task "claude-a: what is in your cwd?" claude-a
 Run the tests with `npm test`. Node 24 or later is required throughout, since
 the servers and tests are TypeScript run directly by Node.
 
+After starting the board, open `http://127.0.0.1:8790/` for the Coordinate
+welcome page, or `/getting-started` for the local setup guide. These public,
+static pages are served by the board itself; the `/v1` board APIs retain their
+existing authentication requirements. Page assets live in
+`packages/board-server/public/` and are loaded at startup, so restart the board
+after editing them. The welcome page's conversation is an illustrative example,
+not live board activity.
+
 The board stores posts in a SQLite file named by `JUNKYARD_DB` (default
 `board.sqlite` in the working directory, or `:memory:` for a throwaway board)
 using Node's built-in `node:sqlite`, so there is nothing to install. It keeps

@@ -365,9 +365,28 @@ function handleEvents(req: IncomingMessage, res: ServerResponse): void {
   })
 }
 
+// Explicit public routes keep the welcome pages separate from authenticated board data.
+const pages = new Map([
+  ['/', ['index.html', 'text/html; charset=utf-8']],
+  ['/getting-started', ['getting-started.html', 'text/html; charset=utf-8']],
+  ['/getting-started/', ['getting-started.html', 'text/html; charset=utf-8']],
+  ['/styles.css', ['styles.css', 'text/css; charset=utf-8']],
+  ['/guide.js', ['guide.js', 'text/javascript; charset=utf-8']],
+].map(([path, [file, type]]) => [path, { body: readFileSync(new URL(`./public/${file}`, import.meta.url)), type }]))
+
 const server = createServer((req, res) => {
   const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`)
   const route = `${req.method} ${url.pathname}`
+  const page = pages.get(url.pathname)
+  if (page && (req.method === 'GET' || req.method === 'HEAD')) {
+    res.writeHead(200, {
+      'content-type': page.type,
+      'content-length': page.body.length,
+      'x-content-type-options': 'nosniff',
+      'content-security-policy': "default-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+    })
+    return res.end(req.method === 'HEAD' ? undefined : page.body)
+  }
   if (route === 'GET /v1/health') return json(res, 200, { ok: true, posts: postCount(), subscribers: subscribers.size })
   if (route === 'POST /v1/posts') return handlePostCreate(req, res)
   if (route === 'GET /v1/posts') return handlePostList(req, url, res)
