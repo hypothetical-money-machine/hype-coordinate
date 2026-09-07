@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Minimal in-memory board server.
+ * Minimal board server backed by SQLite (node:sqlite, no dependencies).
  *
  * Exists so the adapters have something to run against. The post schema and
  * the auth model are provisional; see notes/design-notes.md.
@@ -13,11 +13,15 @@
  *
  * Agents come from JUNKYARD_AGENTS, a JSON object of {agentId: token}, or
  * from the file named by JUNKYARD_AGENTS_FILE.
+ *
+ * Posts persist in the file named by JUNKYARD_DB (default ./board.sqlite;
+ * ":memory:" for a throwaway board). JUNKYARD_MAX_POSTS bounds retention.
  */
 
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto'
 import { readFileSync } from 'node:fs'
+import { DatabaseSync } from 'node:sqlite'
 
 const PORT = Number(process.env.JUNKYARD_PORT ?? 8790)
 const HOST = process.env.JUNKYARD_HOST ?? '127.0.0.1'
@@ -40,6 +44,7 @@ const POST_TYPES = new Set<string>(['task', 'offer', 'claim', 'status', 'reply']
 const PRIORITIES = new Set<string>(['interrupt', 'normal', 'ambient'])
 const MAX_BODY = 16 * 1024
 const MAX_POSTS = Number(process.env.JUNKYARD_MAX_POSTS ?? 10_000)
+const DB_PATH = process.env.JUNKYARD_DB ?? 'board.sqlite'
 
 function loadAgents(): Map<string, string> {
   const raw = process.env.JUNKYARD_AGENTS_FILE
@@ -64,8 +69,107 @@ for (const [id, tok] of agents) {
   tokenToAgent.set(tok, id)
 }
 
-const posts: Post[] = []
-let seq = 0
+// ---------------------------------------------------------------- storage
+
+const db = new DatabaseSync(DB_PATH)
+db.exec(`
+  PRAGMA journal_mode = WAL;
+  PRAGMA synchronous = NORMAL;
+  CREATE TABLE IF NOT EXISTS posts (
+    seq      INTEGER PRIMARY KEY,
+    id       TEXT NOT NULL UNIQUE,
+    ts       TEXT NOT NULL,
+    "from"   TEXT NOT NULL,
+    type     TEXT NOT NULL,
+    body     TEXT NOT NULL,
+    thread   TEXT NOT NULL,
+    "to"     TEXT,
+    priority TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS posts_thread ON posts(thread, seq);
+`)
+
+const stmt = {
+  insert: db.prepare(
+    `INSERT INTO posts (id, ts, "from", type, body, thread, "to", priority) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  ),
+  seqOf: db.prepare('SELECT seq FROM posts WHERE id = ?'),
+  count: db.prepare('SELECT count(*) AS n FROM posts'),
+  after: db.prepare('SELECT * FROM posts WHERE seq > ? ORDER BY seq'),
+  lastN: db.prepare('SELECT * FROM posts WHERE seq > (SELECT coalesce(max(seq), 0) - ? FROM posts) ORDER BY seq'),
+  trim: db.prepare('DELETE FROM posts WHERE seq <= (SELECT max(seq) FROM posts) - ?'),
+  // Newest `limit` rows the caller may read (own posts, public posts, or posts addressed
+  // to them), optionally within a thread, returned oldest first. Filtering and bounding
+  // happen in SQL so a list never decodes more rows than it returns.
+  list: db.prepare(`
+    SELECT * FROM (
+      SELECT * FROM posts
+      WHERE seq > :after
+        AND ("from" = :agent OR "to" IS NULL OR "to" = :agent)
+        AND (:thread IS NULL OR thread = :thread)
+      ORDER BY seq DESC LIMIT :limit
+    ) ORDER BY seq
+  `),
+}
+
+/** A write the database refused. The post was not stored; the client should see a 500, not a 400. */
+class StorageError extends Error {
+  constructor(cause: unknown) {
+    super(`storage: ${cause instanceof Error ? cause.message : String(cause)}`)
+  }
+}
+
+type Row = Record<string, unknown>
+
+function rowToPost(r: Row): Post {
+  const post: Post = {
+    id: r.id as string,
+    seq: Number(r.seq),
+    ts: r.ts as string,
+    from: r.from as string,
+    type: r.type as PostType,
+    body: r.body as string,
+    thread: r.thread as string,
+    priority: r.priority as Priority,
+  }
+  if (r.to != null) post.to = r.to as string
+  return post
+}
+
+/** Insert and trim commit together: a post is either stored and delivered, or neither. */
+function insertPost(p: Omit<Post, 'seq'>): Post {
+  db.exec('BEGIN IMMEDIATE')
+  try {
+    const { lastInsertRowid } = stmt.insert.run(p.id, p.ts, p.from, p.type, p.body, p.thread, p.to ?? null, p.priority)
+    stmt.trim.run(MAX_POSTS)
+    db.exec('COMMIT')
+    return { ...p, seq: Number(lastInsertRowid) }
+  } catch (err) {
+    try { db.exec('ROLLBACK') } catch { /* transaction already gone */ }
+    throw new StorageError(err)
+  }
+}
+
+function seqOf(id: string): number | null {
+  const r = stmt.seqOf.get(id) as Row | undefined
+  return r ? Number(r.seq) : null
+}
+
+function postsAfter(seq: number): Post[] {
+  return (stmt.after.all(seq) as Row[]).map(rowToPost)
+}
+
+function lastPosts(n: number): Post[] {
+  return (stmt.lastN.all(n) as Row[]).map(rowToPost)
+}
+
+function listPosts(agent: string, after: number, thread: string | null, limit: number): Post[] {
+  return (stmt.list.all({ after, agent, thread, limit }) as Row[]).map(rowToPost)
+}
+
+function postCount(): number {
+  return Number((stmt.count.get() as Row).n)
+}
 
 type Subscriber = { agent: string; token: string; res: ServerResponse }
 const subscribers = new Set<Subscriber>()
@@ -186,9 +290,8 @@ function handlePostCreate(req: IncomingMessage, res: ServerResponse): void {
 
       const id = randomUUID()
       const thread = (input.thread as string | undefined) ?? id
-      const post: Post = {
+      const draft: Omit<Post, 'seq'> = {
         id,
-        seq: ++seq,
         ts: new Date().toISOString(),
         from: agent,
         type: type as PostType,
@@ -196,9 +299,8 @@ function handlePostCreate(req: IncomingMessage, res: ServerResponse): void {
         thread,
         priority: priority as Priority,
       }
-      if (input.to !== undefined) post.to = input.to as string
-      posts.push(post)
-      if (posts.length > MAX_POSTS) posts.splice(0, posts.length - MAX_POSTS)
+      if (input.to !== undefined) draft.to = input.to as string
+      const post = insertPost(draft)
       process.stderr.write(`board: post ${post.seq} from ${agent} (${post.type}${post.to ? ` to ${post.to}` : ''})\n`)
       deliver(post)
       json(res, 201, post)
@@ -206,6 +308,10 @@ function handlePostCreate(req: IncomingMessage, res: ServerResponse): void {
     .catch(err => {
       const msg = err instanceof Error ? err.message : String(err)
       if (res.headersSent || res.destroyed) return
+      if (err instanceof StorageError) {
+        process.stderr.write(`board: ${msg}\n`)
+        return json(res, 500, { error: 'storage failure; post not saved' })
+      }
       json(res, msg === 'body too large' ? 413 : 400, { error: msg })
     })
 }
@@ -216,15 +322,10 @@ function handlePostList(req: IncomingMessage, url: URL, res: ServerResponse): vo
   const since = url.searchParams.get('since')
   const thread = url.searchParams.get('thread')
   const limit = parseLimit(url.searchParams.get('limit'), 50, 500)
-  let start = 0
-  if (since) {
-    const idx = posts.findIndex(p => p.id === since)
-    start = idx >= 0 ? idx + 1 : 0
-  }
+  const start = since ? (seqOf(since) ?? 0) : 0
   // The caller's own posts are included here (unlike the stream) so it can read back what it wrote.
-  let out = posts.slice(start).filter(p => p.from === caller.agent || visibleTo(p, caller.agent))
-  if (thread) out = out.filter(p => p.thread === thread)
-  json(res, 200, { posts: out.slice(-limit) })
+  // The SQL predicate mirrors visibleTo() plus that own-post rule; keep the two in step.
+  json(res, 200, { posts: listPosts(caller.agent, start, thread, limit) })
 }
 
 function handleEvents(req: IncomingMessage, res: ServerResponse): void {
@@ -246,10 +347,10 @@ function handleEvents(req: IncomingMessage, res: ServerResponse): void {
   // last REPLAY_UNKNOWN posts rather than the whole history.
   const last = req.headers['last-event-id']
   if (typeof last === 'string' && last) {
-    const idx = posts.findIndex(p => p.id === last)
-    const from = idx >= 0 ? idx + 1 : Math.max(0, posts.length - REPLAY_UNKNOWN)
-    if (idx < 0) process.stderr.write(`board: ${agent} resumed from unknown cursor; replaying last ${posts.length - from}\n`)
-    for (const post of posts.slice(from)) {
+    const cursor = seqOf(last)
+    const replay = cursor !== null ? postsAfter(cursor) : lastPosts(REPLAY_UNKNOWN)
+    if (cursor === null) process.stderr.write(`board: ${agent} resumed from unknown cursor; replaying last ${replay.length}\n`)
+    for (const post of replay) {
       if (visibleTo(post, agent)) send(sub, frame(post, token))
     }
     if (!subscribers.has(sub) && sub.res.destroyed) return
@@ -267,7 +368,7 @@ function handleEvents(req: IncomingMessage, res: ServerResponse): void {
 const server = createServer((req, res) => {
   const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`)
   const route = `${req.method} ${url.pathname}`
-  if (route === 'GET /v1/health') return json(res, 200, { ok: true, posts: posts.length, subscribers: subscribers.size })
+  if (route === 'GET /v1/health') return json(res, 200, { ok: true, posts: postCount(), subscribers: subscribers.size })
   if (route === 'POST /v1/posts') return handlePostCreate(req, res)
   if (route === 'GET /v1/posts') return handlePostList(req, url, res)
   if (route === 'GET /v1/events') return handleEvents(req, res)
@@ -278,5 +379,5 @@ process.on('uncaughtException', err => process.stderr.write(`board: uncaught exc
 process.on('unhandledRejection', err => process.stderr.write(`board: unhandled rejection: ${err}\n`))
 
 server.listen(PORT, HOST, () => {
-  process.stderr.write(`board: listening on http://${HOST}:${PORT} with ${agents.size} agent(s)\n`)
+  process.stderr.write(`board: listening on http://${HOST}:${PORT} with ${agents.size} agent(s), ${postCount()} post(s) in ${DB_PATH}\n`)
 })

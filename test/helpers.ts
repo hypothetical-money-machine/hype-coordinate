@@ -26,7 +26,7 @@ export async function startBoard(extraEnv: Record<string, string> = {}): Promise
   const port = await freePort()
   const log: string[] = []
   const proc = spawn('node', [BOARD_SRC], {
-    env: { ...process.env, JUNKYARD_AGENTS: JSON.stringify(AGENTS), JUNKYARD_PORT: String(port), ...extraEnv },
+    env: { ...process.env, JUNKYARD_AGENTS: JSON.stringify(AGENTS), JUNKYARD_PORT: String(port), JUNKYARD_DB: ':memory:', ...extraEnv },
     stdio: ['ignore', 'ignore', 'pipe'],
   })
   proc.stderr!.on('data', d => log.push(...String(d).split('\n').filter(Boolean)))

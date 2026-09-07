@@ -1,6 +1,10 @@
 import { test, after, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import { startBoard, post, list, AGENTS, BOARD_SRC, type Board } from './helpers.ts'
 
 let board: Board
@@ -90,4 +94,82 @@ test('a dead subscriber is dropped without affecting others', async () => {
   assert.match(text, /still delivered/)
   const health = (await (await fetch(`${board.url}/v1/health`)).json()) as { subscribers: number }
   assert.ok(health.subscribers <= 1, `expected dead subscriber gone, saw ${health.subscribers}`)
+})
+
+test('posts and cursors survive a board restart', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'junkyard-db-'))
+  const db = join(dir, 'board.sqlite')
+  try {
+    const first = await startBoard({ JUNKYARD_DB: db })
+    const a = (await (await post(first, AGENTS.morgan, { type: 'task', body: 'before restart' })).json()) as { id: string }
+    const b = (await (await post(first, AGENTS.morgan, { type: 'task', body: 'also before' })).json()) as { id: string }
+    first.stop()
+    await new Promise(r => first.proc.on('exit', r))
+
+    const second = await startBoard({ JUNKYARD_DB: db })
+    try {
+      const all = await list(second, AGENTS.morgan)
+      assert.deepEqual(all.posts.map(p => p.id), [a.id, b.id])
+
+      // A known cursor replays exactly what follows it, not the bounded tail.
+      const c = (await (await post(second, AGENTS.morgan, { type: 'task', body: 'after restart' })).json()) as { id: string; seq: number }
+      assert.equal(c.seq, 3, 'sequence continues from the stored posts')
+      const res = await fetch(`${second.url}/v1/events`, {
+        headers: { authorization: `Bearer ${AGENTS['claude-a']}`, 'last-event-id': a.id },
+      })
+      const reader = res.body!.getReader()
+      let text = ''
+      while (!text.includes(c.id)) text += new TextDecoder().decode((await reader.read()).value)
+      await reader.cancel()
+      const ids = [...text.matchAll(/^id: (.+)$/gm)].map(m => m[1])
+      assert.deepEqual(ids, [b.id, c.id])
+      assert.ok(!second.log.some(l => l.includes('unknown cursor')))
+    } finally {
+      second.stop()
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('list applies thread, cursor and limit together and returns the newest matches oldest-first', async () => {
+  const t = 'thread-' + Math.random().toString(36).slice(2)
+  const ids: string[] = []
+  for (let i = 0; i < 5; i++) {
+    const r = (await (await post(board, AGENTS.morgan, { type: 'status', body: `t${i}`, thread: t })).json()) as { id: string }
+    ids.push(r.id)
+    await post(board, AGENTS.morgan, { type: 'status', body: `noise${i}` })
+  }
+  const r = await list(board, AGENTS['claude-a'], `?thread=${t}&limit=2`)
+  assert.deepEqual(r.posts.map(p => p.body), ['t3', 't4'])
+  const r2 = await list(board, AGENTS['claude-a'], `?thread=${t}&since=${ids[1]}&limit=10`)
+  assert.deepEqual(r2.posts.map(p => p.body), ['t2', 't3', 't4'])
+})
+
+test('a failed retention delete rolls back the insert and reports a server error', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'junkyard-db-'))
+  const dbPath = join(dir, 'board.sqlite')
+  try {
+    const first = await startBoard({ JUNKYARD_DB: dbPath, JUNKYARD_MAX_POSTS: '1' })
+    await post(first, AGENTS.morgan, { type: 'task', body: 'kept' })
+    first.stop()
+    await new Promise(r => first.proc.on('exit', r))
+
+    const db = new DatabaseSync(dbPath)
+    db.exec("CREATE TRIGGER block_trim BEFORE DELETE ON posts BEGIN SELECT RAISE(ABORT, 'injected'); END")
+    db.close()
+
+    const second = await startBoard({ JUNKYARD_DB: dbPath, JUNKYARD_MAX_POSTS: '1' })
+    try {
+      const r = await post(second, AGENTS.morgan, { type: 'task', body: 'lost' })
+      assert.equal(r.status, 500)
+      assert.match(await r.text(), /storage failure/)
+      assert.deepEqual((await list(second, AGENTS.morgan)).posts.map(p => p.body), ['kept'])
+      assert.ok(second.log.some(l => l.includes('injected')), 'storage error is logged')
+    } finally {
+      second.stop()
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })
